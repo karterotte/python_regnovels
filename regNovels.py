@@ -8,16 +8,16 @@
 
 import os
 import sys
-import re
 import glob
 import codecs
 import inspect
 from  xml.dom import  minidom
-
+import multiprocessing
 import re
 import time
+import tqdm
 incode='utf8'
-outcode='gbk'#'utf8'
+outcode = 'utf8'  # 'utf8'
 try:
     import chardet
     from chardet.universaldetector import UniversalDetector
@@ -39,13 +39,13 @@ def typenum_deco(func):
         res=func(cls)
         seccolock=round(time.clock(),3)-strcolock
         ss=u"-››%s调整数目：%s\t耗时：%ss"%(func.func_doc.ljust(13),str(res).ljust(5),"%.3f"%seccolock)
-        print ss.encode(outcode,'ignore')
+        cls.report.append(ss.encode(outcode, 'ignore'))
         return res
     return wrapper
 def checkcode(checkobj):
     '''判断读取文章的编码'''
     if not 'chardet' in sys.modules or checkbianma==0:
-        return 'mbcs'#默认只能编辑gbk/mbcs的文章，utf8的会出错
+        return 'gbk'  # 默认只能编辑gbk/mbcs的文章，utf8的会出错
     code=''
     if (isinstance(checkobj,file)):
         detector=UniversalDetector()
@@ -64,7 +64,7 @@ def checkcode(checkobj):
     else:
         pass
     if code=="GB2312":
-        code='mbcs'
+        code = 'gbk'  # no mbcs in mac
     return code
 
 class Novel_Input:
@@ -85,7 +85,6 @@ class Novel_Input:
             ans=raw_input(welcomestr.encode(outcode))
             if ans=='1':
                 while True:
-                    inputpath=""
                     inputpath=raw_input(u'请拖放或输入路径（txt文件或文件夹），或输入0（零）结束...\n'.encode(outcode))
                     if inputpath=='0':
                         break
@@ -115,7 +114,6 @@ class Novel_Input:
                 continue
 
     def checkpath(self,inputpath):
-        check=0
         if os.path.isfile(inputpath):
             if(os.path.splitext(inputpath)[1]=='.txt'):      
                 check=1
@@ -226,7 +224,6 @@ class Novel_Info:
         self.title=os.path.split(os.path.splitext(self.path)[0])[1]
         self.size="%sKB"%int(info.st_size/1024)
         self.filecode=checkcode(self.path)
-        print self.title,self.size,self.filecode
     def readfile(self):
         f=codecs.open(self.path,'rU')
         #读取文件，\r\n会统一替换为\n
@@ -234,7 +231,8 @@ class Novel_Info:
             self.content=f.read()
             #这个步骤不可缺少，否则正则表达式无法匹配
             #读取ANSI文件内容，先转成mbcs或gbk的unicode，再转成utf8字符串（因为程序脚本的正则匹配字符串是utf8）
-            self.content=self.content.decode(self.filecode)#.encode(incode)
+            self.content = self.content.decode(self.filecode,
+                                               'ignore')  #.encode(incode)
         except Exception as e:
             raise e
         finally:
@@ -247,6 +245,7 @@ class DoTypeSet:
         self.output=""
         self.catalog=""
         self.result=novelinfo.content
+        self.report = []
     def dotypeset(self):
         func01(self)
         func02(self)
@@ -258,6 +257,7 @@ class DoTypeSet:
         # 
         func01fix(self)
     def doconvert(self,target='SimpleChinese'):
+        '''too slow ,discard'''
         if target=='SimpleChinese':
             self.result=langconv.Converter('zh-hans').convert(self.result)
         elif target=='TraditionChinese':
@@ -271,12 +271,15 @@ class DoTypeSet:
         if not os.path.exists(self.output):
             os.mkdir(self.output)
         self.output=os.path.join(self.output,fname)
-        print "outputPath:%s "%self.output
         f1=codecs.open(self.output,'w',incode)
         if self.config[u"章节标识"]==u"Y":
             f1.write(self.catalog+'\r\n')
         f1.write(self.result)
         f1.close()
+        self.report.append("%s: Finish." % self.novel.title)
+
+    def make_report(self):
+        return '\n'.join(self.report)
 
 @typenum_deco
 def func01(cls):
@@ -288,7 +291,6 @@ def func01(cls):
         if len(item)>50:
             continue
         result=item
-        print result.encode(outcode)
         cls.catalog+=result+"\r\n"
     #先进行替换处理，避免后续正则修改章节名称格式
     result = patternobj.sub(func01sp, cls.result)
@@ -376,14 +378,28 @@ def func07(cls):
     result = patternobj.sub(newstring, cls.result)
     cls.result=result
     return len(res)
+
+
+def single_job(novel):
+    b = Novel_Info(novel)
+    c = DoTypeSet(rc, b)
+    c.dotypeset()
+    # c.doconvert() too slow
+    c.makefile()
+    return c.make_report()
+
 if __name__ == '__main__':
     rc=RegexConfig()
     a= Novel_Input()
     a.inputNovels()
+    workers = []
+    pool = multiprocessing.Pool(processes=4)
+    results = []
     for nu,novel in enumerate(a.getnovels()):
-        print str(nu+1).zfill(3),novel.split(os.path.sep)[-1]
-        b=Novel_Info(novel)
-        c=DoTypeSet(rc,b)
-        c.dotypeset()
-        c.doconvert()
-        c.makefile()
+        results.append(pool.apply_async(single_job, (novel,)))
+    pool.close()
+    pool.join()
+    for result in results:
+        print(result.get())
+    print("\nall done" )
+
